@@ -1,0 +1,509 @@
+import os
+import uuid
+from typing import Any, List, Optional, Tuple, Union
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import FileResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from app.api.deps import (
+    get_current_active_user,
+    require_organization_membership,
+    require_role,
+)
+from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
+from app.db.session import get_db
+from app.models.document import Document, DocumentStatus
+from app.models.membership import OrganizationMembership, OrganizationRole
+from app.models.user import User
+from app.schemas.auth import MessageResponse
+from app.schemas.document import (
+    DocumentCreate,
+    DocumentResponse,
+    DocumentUpdate,
+    PaginatedDocumentResponse,
+)
+from app.services.document_service import DocumentService
+
+router = APIRouter()
+
+
+async def get_active_org_membership(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrganizationMembership:
+    """Resolves the user's active organization membership from header or active memberships."""
+    active_org_id = request.headers.get("X-Organization-Id")
+    if active_org_id:
+        for m in current_user.memberships:
+            if m.is_active and m.organization_id == active_org_id:
+                return m
+
+    # Fallback to first active membership
+    for m in current_user.memberships:
+        if m.is_active:
+            return m
+
+    if current_user.is_superuser:
+        # Superuser fallback if no membership
+        first_org_res = await db.execute(select(Document.organization_id).limit(1))
+        first_org = first_org_res.scalar_one_or_none() or "system"
+        return OrganizationMembership(
+            id="superuser-active",
+            user_id=current_user.id,
+            organization_id=first_org,
+            role=OrganizationRole.ADMIN.value,
+            is_active=True,
+            user=current_user,
+        )
+
+    raise ForbiddenError("No active organization membership found. Please join or create an organization.")
+
+
+async def verify_document_access(
+    doc_id: str,
+    current_user: User,
+    db: AsyncSession,
+) -> Tuple[Document, Optional[OrganizationMembership]]:
+    """Verifies that the user has an active membership in the document's organization."""
+    query = (
+        select(Document)
+        .where(Document.id == doc_id)
+        .options(selectinload(Document.uploader))
+    )
+    res = await db.execute(query)
+    doc = res.scalar_one_or_none()
+    if not doc:
+        raise NotFoundError("Document", doc_id)
+
+    # Check user membership
+    user_mem = next(
+        (m for m in current_user.memberships if m.is_active and m.organization_id == doc.organization_id),
+        None,
+    )
+    if not user_mem and not current_user.is_superuser:
+        raise ForbiddenError("You do not have access to this document's organization.")
+
+    return doc, user_mem
+
+
+# ==============================================================================
+# Document Upload Endpoints
+# ==============================================================================
+
+@router.post(
+    "/documents/upload",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload document (PDF, PNG, JPEG) with validation to active organization",
+)
+async def upload_document_active_org(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    doc_type: Optional[str] = Form(None),
+    membership: OrganizationMembership = Depends(get_active_org_membership),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Ingests and validates document file (PDF, PNG, JPEG) up to 50MB.
+    Checks size, MIME type, extension, and binary magic bytes.
+    Enforces Admin or Analyst role in the active organization.
+    """
+    if membership.role.lower() not in [
+        OrganizationRole.ADMIN.value.lower(),
+        OrganizationRole.ANALYST.value.lower(),
+    ]:
+        raise ForbiddenError("Only Administrators and Analysts can upload documents.")
+
+    content = await file.read()
+    service = DocumentService(db)
+    doc = await service.upload_document(
+        org_id=membership.organization_id,
+        uploader=current_user,
+        raw_filename=file.filename or "upload.pdf",
+        content_type=file.content_type or "application/octet-stream",
+        file_bytes=content,
+        title=title,
+        doc_type=doc_type,
+    )
+    return doc
+
+
+@router.post(
+    "/organizations/{org_id}/documents/upload",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload document to a specific organization with validation",
+)
+async def upload_document_specific_org(
+    org_id: str,
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    doc_type: Optional[str] = Form(None),
+    membership: OrganizationMembership = Depends(
+        require_role([OrganizationRole.ADMIN.value, OrganizationRole.ANALYST.value], "org_id")
+    ),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Uploads and validates a document into the specified organization."""
+    content = await file.read()
+    service = DocumentService(db)
+    doc = await service.upload_document(
+        org_id=org_id,
+        uploader=current_user,
+        raw_filename=file.filename or "upload.pdf",
+        content_type=file.content_type or "application/octet-stream",
+        file_bytes=content,
+        title=title,
+        doc_type=doc_type,
+    )
+    return doc
+
+
+@router.post(
+    "/organizations/{org_id}/documents",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a document entry under an organization (JSON metadata)",
+)
+async def create_org_document_legacy(
+    org_id: str,
+    payload: DocumentCreate,
+    membership: OrganizationMembership = Depends(
+        require_role([OrganizationRole.ADMIN.value, OrganizationRole.ANALYST.value], "org_id")
+    ),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Registers document metadata isolated to this organization."""
+    service = DocumentService(db)
+    # Check extension
+    _, ext = os.path.splitext(payload.filename.lower())
+    if not ext:
+        ext = ".pdf"
+    storage_key = f"{org_id}/{uuid.uuid4()}{ext}"
+
+    doc = Document(
+        id=str(uuid.uuid4()),
+        organization_id=org_id,
+        uploader_id=current_user.id,
+        title=payload.title,
+        filename=payload.filename,
+        storage_key=storage_key,
+        file_path=f"./storage/documents/{storage_key}",
+        file_size_bytes=payload.file_size_bytes,
+        mime_type=payload.mime_type,
+        file_extension=ext,
+        checksum_sha256="",
+        status=DocumentStatus.UPLOADED.value,
+        doc_type=payload.doc_type,
+        extra_metadata=payload.extra_metadata or {},
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+# ==============================================================================
+# Document Query, Search, Filter & Pagination Endpoints
+# ==============================================================================
+
+@router.get(
+    "/documents",
+    response_model=PaginatedDocumentResponse,
+    summary="List documents for user's active organization with search, filter, and pagination",
+)
+async def list_documents_active_org(
+    search: Optional[str] = Query(None, description="Search term for title or filename"),
+    status: Optional[str] = Query(None, description="Filter by DocumentStatus"),
+    doc_type: Optional[str] = Query(None, description="Filter by doc_type (e.g. 10-K, INVOICE)"),
+    sort_by: str = Query("created_at", description="Sort field: created_at, title, file_size_bytes"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    membership: OrganizationMembership = Depends(get_active_org_membership),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns paginated, searchable, and filterable documents for user's active organization."""
+    service = DocumentService(db)
+    return await service.list_documents(
+        org_id=membership.organization_id,
+        search=search,
+        status=status,
+        doc_type=doc_type,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/organizations/{org_id}/documents",
+    response_model=Union[PaginatedDocumentResponse, List[DocumentResponse]],
+    summary="List documents for an organization (Strict isolation)",
+)
+async def list_org_documents(
+    org_id: str,
+    paginate: bool = Query(False, description="Return full paginated schema if true"),
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    doc_type: Optional[str] = Query(None),
+    sort_by: str = Query("created_at"),
+    sort_order: str = Query("desc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(require_organization_membership("org_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns documents belonging strictly to the specified organization.
+    Supports either plain list or full pagination.
+    """
+    service = DocumentService(db)
+    paginated_res = await service.list_documents(
+        org_id=org_id,
+        search=search,
+        status=status,
+        doc_type=doc_type,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        page_size=page_size,
+    )
+
+    if paginate:
+        return paginated_res
+    return paginated_res.items
+
+
+# ==============================================================================
+# Single Document Retrieval, Details, Preview & Download Endpoints
+# ==============================================================================
+
+@router.get(
+    "/documents/{doc_id}",
+    response_model=DocumentResponse,
+    summary="Get document details by ID with organization verification",
+)
+async def get_document_by_id(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetches document details if user belongs to the document's organization."""
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    return doc
+
+
+@router.get(
+    "/organizations/{org_id}/documents/{doc_id}",
+    response_model=DocumentResponse,
+    summary="Get single document with organization isolation verification",
+)
+async def get_org_document_legacy(
+    org_id: str,
+    doc_id: str,
+    membership: OrganizationMembership = Depends(require_organization_membership("org_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetches a document ensuring it belongs strictly to this organization."""
+    service = DocumentService(db)
+    return await service.get_document(doc_id, org_id)
+
+
+@router.get(
+    "/documents/{doc_id}/preview",
+    summary="Safe inline preview for PDF, PNG, or JPEG documents",
+)
+async def preview_document(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Serves document file with Content-Disposition inline for safe browser previewing.
+    Prevents path traversal and validates tenant boundary.
+    """
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = DocumentService(db)
+    safe_path, mime_type, filename = await service.get_document_file_for_serving(
+        doc_id=doc.id, org_id=doc.organization_id
+    )
+
+    return FileResponse(
+        path=safe_path,
+        media_type=mime_type,
+        filename=filename,
+        content_disposition_type="inline",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
+@router.get(
+    "/organizations/{org_id}/documents/{doc_id}/preview",
+    summary="Safe inline preview for PDF, PNG, or JPEG documents (Org-scoped)",
+)
+async def preview_org_document(
+    org_id: str,
+    doc_id: str,
+    membership: OrganizationMembership = Depends(require_organization_membership("org_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serves document for preview within organization scope."""
+    service = DocumentService(db)
+    safe_path, mime_type, filename = await service.get_document_file_for_serving(
+        doc_id=doc_id, org_id=org_id
+    )
+    return FileResponse(
+        path=safe_path,
+        media_type=mime_type,
+        filename=filename,
+        content_disposition_type="inline",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
+@router.get(
+    "/documents/{doc_id}/download",
+    summary="Safe attachment download for documents",
+)
+async def download_document(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Serves document file with Content-Disposition attachment for downloading.
+    Prevents path traversal and validates tenant boundary.
+    """
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = DocumentService(db)
+    safe_path, mime_type, filename = await service.get_document_file_for_serving(
+        doc_id=doc.id, org_id=doc.organization_id
+    )
+
+    return FileResponse(
+        path=safe_path,
+        media_type=mime_type,
+        filename=filename,
+        content_disposition_type="attachment",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get(
+    "/organizations/{org_id}/documents/{doc_id}/download",
+    summary="Safe attachment download for documents (Org-scoped)",
+)
+async def download_org_document(
+    org_id: str,
+    doc_id: str,
+    membership: OrganizationMembership = Depends(require_organization_membership("org_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serves document for attachment download within organization scope."""
+    service = DocumentService(db)
+    safe_path, mime_type, filename = await service.get_document_file_for_serving(
+        doc_id=doc_id, org_id=org_id
+    )
+    return FileResponse(
+        path=safe_path,
+        media_type=mime_type,
+        filename=filename,
+        content_disposition_type="attachment",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# ==============================================================================
+# Document Update and Deletion Endpoints
+# ==============================================================================
+
+@router.patch(
+    "/documents/{doc_id}",
+    response_model=DocumentResponse,
+    summary="Update document metadata or processing status",
+)
+async def update_document_endpoint(
+    doc_id: str,
+    payload: DocumentUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Updates document metadata or status with organization authorization check."""
+    doc, mem = await verify_document_access(doc_id, current_user, db)
+    if mem and mem.role.lower() not in [
+        OrganizationRole.ADMIN.value.lower(),
+        OrganizationRole.ANALYST.value.lower(),
+    ]:
+        raise ForbiddenError("Reviewers cannot edit document metadata.")
+
+    service = DocumentService(db)
+    return await service.update_document(doc_id=doc.id, org_id=doc.organization_id, payload=payload)
+
+
+@router.delete(
+    "/documents/{doc_id}",
+    response_model=MessageResponse,
+    summary="Delete document from database and purge from storage",
+)
+async def delete_document_endpoint(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Deletes document record and cleans up filesystem storage artifact.
+    Requires Admin privileges in the organization.
+    """
+    doc, mem = await verify_document_access(doc_id, current_user, db)
+    if mem and mem.role.lower() != OrganizationRole.ADMIN.value.lower() and not current_user.is_superuser:
+        raise ForbiddenError("Only Administrators can delete documents.")
+
+    service = DocumentService(db)
+    title = await service.delete_document(doc_id=doc.id, org_id=doc.organization_id)
+    return MessageResponse(message=f"Document '{title}' deleted successfully.")
+
+
+@router.delete(
+    "/organizations/{org_id}/documents/{doc_id}",
+    response_model=MessageResponse,
+    summary="Delete a document from an organization (Admin role required)",
+)
+async def delete_org_document_legacy(
+    org_id: str,
+    doc_id: str,
+    membership: OrganizationMembership = Depends(
+        require_role([OrganizationRole.ADMIN.value], "org_id")
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deletes a document from the organization. Requires Admin privileges."""
+    service = DocumentService(db)
+    title = await service.delete_document(doc_id=doc_id, org_id=org_id)
+    return MessageResponse(message=f"Document '{title}' deleted successfully.")

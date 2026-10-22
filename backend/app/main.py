@@ -23,6 +23,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         get_engine()
         logger.info("Database engine connectivity verified.")
+        from app.db.seed import seed_demo_accounts
+        await seed_demo_accounts()
     except Exception as exc:
         logger.error(f"Error during database startup initialization: {exc}")
 

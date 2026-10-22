@@ -290,9 +290,137 @@ npm run test
 
 ---
 
-## Roadmap
+## Authentication, Roles & Organization Isolation (Phase 2)
 
-- **Phase 1: Architecture & Project Foundation** *(Current)*: Modular monolith, FastAPI, SQLAlchemy 2.0, Alembic, Redis, React Vite App Shell, Health Dashboard, Docker Compose.
-- **Phase 2: Document Ingestion & AI Parsing**: SEC filing parsing (10-K, 10-Q), OCR extraction, PDF table parsing, bounding box alignment, financial embeddings.
-- **Phase 3: Financial RAG & Human-in-the-Loop Review**: Hybrid vector search, financial ratio cross-checking, confidence-based review queue, SEC compliance audit logging.
-- **Phase 4: Financial Analytics & Insights**: Interactive time-series visualizers, cross-portfolio aggregation, executive report export, enterprise RBAC.
+DocuFin AI implements a zero-trust multi-tenant architecture with strict organization isolation, cryptographic credential security, and role-based access control.
+
+### Security Architecture
+
+- **Password Hashing**: OWASP-compliant **Argon2id** (`memory_cost=64MB`, `time_cost=2`, `parallelism=2`, `hash_len=32`, `salt_len=16`). Plaintext passwords are never stored or logged.
+- **Session Strategy**: Short-lived JWT access tokens issued and verified via cryptographic signature (`HS256`).
+- **Browser Protection**: Credentials dispatched via `HttpOnly`, `SameSite=Lax`, and `Secure` (in HTTPS/production) cookies with double-submit `X-CSRF-Token` validation on state-changing requests.
+- **API Interoperability**: Standard `Authorization: Bearer <token>` supported for programmatic API clients and tests.
+- **Brute Force Protection**: IP and identifier-scoped login rate limiting (5 failed attempts trigger a 5-minute cooldown) with Redis and in-memory tracking.
+- **Multi-Tenant Isolation**: Strict tenant scoping across all database models (`users`, `organizations`, `organization_memberships`, and `documents`). Cross-organization queries and mutations are blocked with `403 Forbidden` at the dependency layer.
+
+### Enterprise Roles & Permissions
+
+| Role | Scope & Permissions |
+| :--- | :--- |
+| **Admin** | Full tenant administration: add/remove organization members, assign roles, create and delete documents, modify settings. |
+| **Analyst** | Core financial research: upload and register financial documents, run analyses, access AI assistant, view reports. |
+| **Reviewer** | Regulatory compliance & audit: evaluate review queue items, approve/reject financial disclosures, inspect audit trails. |
+
+### Key API Endpoints (Phase 2)
+
+| Method | Endpoint | Description | Role / Auth |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/auth/register` | Register user + provision tenant organization | Public |
+| `POST` | `/api/v1/auth/login` | Authenticate credentials & set HttpOnly cookies | Public (Rate-Limited) |
+| `GET` | `/api/v1/auth/me` | Fetch active user, memberships, and active role | Authenticated |
+| `POST` | `/api/v1/auth/logout` | Invalidate session and clear authentication cookies | Authenticated |
+| `GET` | `/api/v1/organizations` | List organizations user belongs to | Authenticated |
+| `POST` | `/api/v1/organizations` | Create an additional tenant organization | Authenticated |
+| `GET` | `/api/v1/organizations/{org_id}/members` | List members in organization | Member |
+| `POST` | `/api/v1/organizations/{org_id}/members` | Add member with specified role | Admin |
+| `PATCH` | `/api/v1/organizations/{org_id}/members/{user_id}` | Update member role (Admin, Analyst, Reviewer) | Admin |
+| `DELETE` | `/api/v1/organizations/{org_id}/members/{user_id}` | Remove member (preserves last admin) | Admin |
+| `GET` | `/api/v1/organizations/{org_id}/documents` | List documents isolated to this organization | Member |
+| `POST` | `/api/v1/organizations/{org_id}/documents` | Create document entry under organization | Admin / Analyst |
+| `DELETE` | `/api/v1/organizations/{org_id}/documents/{doc_id}` | Delete document from organization | Admin |
+
+---
+
+## Document Management & Secure Storage (Phase 3)
+
+DocuFin AI delivers an enterprise document library with verified binary ingestion, path traversal defense, and organization-scoped authorization.
+
+### Security & Ingestion Pipeline
+
+- **Multi-Layer File Validation**:
+  - **Extension & MIME**: Strictly enforces `.pdf`, `.png`, `.jpg`, `.jpeg` and `application/pdf`, `image/png`, `image/jpeg`.
+  - **Magic Bytes Signature Inspection**: Verifies binary headers directly:
+    - PDF: `%PDF-` (`b"%PDF-"`)
+    - PNG: `\x89PNG\r\n\x1a\n` (`b"\x89PNG\r\n\x1a\n"`)
+    - JPEG: `\xff\xd8\xff` (`b"\xff\xd8\xff"`)
+    - Disguised scripts, executables, or corrupt files are rejected with `422 Unprocessable Entity`.
+  - **Size Guard**: Strict 50MB file size limit enforced before and during streaming. Empty files (0 bytes) are rejected.
+  - **Filename Sanitization**: Cleans client-supplied filenames, stripping directory separators and control characters.
+  - **Cryptographic Integrity**: Computes SHA-256 hash on ingestion for regulatory auditability and tamper detection.
+- **Path Traversal Defense & Isolation**:
+  - Files are stored completely outside the public web root (`./storage/documents`).
+  - Internal storage keys are generated using randomized UUIDs scoped per tenant (`{org_id}/{uuid}.{ext}`).
+  - Internal storage paths and disk keys are never exposed in API responses (`file_path` is kept internal).
+  - Relative path escapes (`../`) and null bytes are rejected using `os.path.commonpath` verification.
+- **Document Processing Lifecycles**:
+  - `UPLOADED`: Stored in vault, verified, and awaiting pipeline queuing.
+  - `QUEUED`: Enqueued for asynchronous pipeline processing.
+  - `PROCESSING`: Actively undergoing classification and OCR parsing.
+  - `REVIEW_REQUIRED`: Highlighted for human analyst review or discrepancy check.
+  - `APPROVED`: Verified and signed off for financial reporting.
+  - `REJECTED`: Disqualified during compliance checks.
+  - `FAILED`: Ingestion or parsing failure recorded with error details.
+- **Safe Serving**:
+  - Preview (`/preview`): Dispatches `Content-Disposition: inline` with `X-Content-Type-Options: nosniff` and `Cache-Control: private`.
+  - Download (`/download`): Dispatches `Content-Disposition: attachment; filename="sanitized_filename"`.
+- **Atomic Deletion**:
+  - Deletes database record and physically purges binary artifact from disk storage in a synchronized transaction.
+
+### Key API Endpoints (Phase 3)
+
+| Method | Endpoint | Description | Role / Auth |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/documents/upload` | Multipart upload for PDF, PNG, JPEG (<=50MB) | Admin / Analyst |
+| `GET` | `/api/v1/documents` | Paginated search, filter, and sort across tenant filings | Member |
+| `GET` | `/api/v1/documents/{id}` | Inspect single document metadata and checksum | Member |
+| `GET` | `/api/v1/documents/{id}/preview` | Safe inline preview for PDF & images (`X-Content-Type-Options: nosniff`) | Member |
+| `GET` | `/api/v1/documents/{id}/download` | Safe attachment download | Member |
+| `PATCH` | `/api/v1/documents/{id}` | Update document metadata, title, or status | Admin / Analyst |
+| `DELETE` | `/api/v1/documents/{id}` | Purge document from database and delete binary storage | Admin |
+
+### Frontend Document Vault Capabilities
+
+- **Document Library Table**: Displays title, filename, document type pill, file size (formatted KB/MB), uploader, upload timestamp, status badge, and action buttons.
+- **Drag-and-Drop Dropzone**: Modern dropzone with drag-active state, client-side format & size pre-validation, document type classification selector, and animated upload progress bar.
+- **Search & Filters**: Real-time title/filename search, status dropdown filter, document type dropdown filter, and sort selector (Date, Title, Size).
+- **Document Preview Modal**:
+  - Embedded PDF iframe viewer with native toolbar controls.
+  - High-resolution image viewer for scanned PNG/JPEG receipts.
+  - Metadata & audit sidebar showing SHA-256 checksum with one-click copy, storage isolation status, uploader details, and timestamps.
+  - Safe download and delete buttons with confirmation dialog.
+- **Role Scoping**: Reviewers are restricted to read-only preview and download. Uploading requires Analyst/Admin role; deletion requires Admin role.
+
+---
+
+## Roadmap & Completion Checklist
+
+- [x] **Phase 1: Architecture & Project Foundation**: Modular monolith, FastAPI, SQLAlchemy 2.0, Alembic, Redis, React Vite App Shell, Health Dashboard, Docker Compose.
+- [x] **Phase 2: Authentication, Roles, and Organization Isolation**:
+  - [x] Database models & migrations (`users`, `organizations`, `organization_memberships`, document tenant FK).
+  - [x] Argon2id password hashing and constant-time credential verification.
+  - [x] Short-lived JWT access tokens and HttpOnly, Secure, SameSite cookie session strategy.
+  - [x] Double-submit CSRF cookie and header protection.
+  - [x] Multi-tenant organization isolation (User in Org A cannot access Org B resources).
+  - [x] Enterprise RBAC: Admin, Analyst, and Reviewer role gates.
+  - [x] Login rate limiting with brute-force lockout controls.
+  - [x] React Login & Register pages with validation and demo quick-fill.
+  - [x] Protected routes with client-side role enforcement and server-side authorization.
+  - [x] Dynamic tenant switcher and role-appropriate navigation.
+  - [x] 100% test coverage for password security, authentication, and organization isolation (23 backend tests, 9 frontend tests).
+- [x] **Phase 3: Document Management and Secure File Storage**:
+  - [x] Support PDF, PNG, and JPEG uploads up to 50MB.
+  - [x] Binary magic bytes inspection (`%PDF-`, `\x89PNG\r\n\x1a\n`, `\xff\xd8\xff`), MIME type, and extension validation.
+  - [x] Unique randomized storage identifiers and path traversal defense (`os.path.commonpath`).
+  - [x] Storage outside public web root (`./storage/documents/<org_id>/<uuid>.<ext>`).
+  - [x] PostgreSQL metadata schema & Alembic migration `0003_document_management_storage`.
+  - [x] Storage service abstraction interface & local filesystem storage adapter.
+  - [x] Organization-scoped authorization for all operations with role enforcement.
+  - [x] Paginated document query engine with search, filters (status, doc_type), and sorting.
+  - [x] Safe inline preview (`/preview`) and attachment download (`/download`) with security headers.
+  - [x] Consistent database & storage deletion.
+  - [x] Document statuses: `UPLOADED`, `QUEUED`, `PROCESSING`, `REVIEW_REQUIRED`, `APPROVED`, `REJECTED`, `FAILED`.
+  - [x] Frontend Document Library with drag-and-drop dropzone, upload progress bar, search, filter, pagination, preview modal, and empty/loading/error states.
+  - [x] Verification test suite: 29 backend tests (100% pass) and 11 frontend tests (100% pass).
+- [ ] **Phase 4: Document Ingestion, OCR & Financial Parsing**: Automated OCR rasterization, SEC filing classification, financial table detection with bounding boxes, financial embeddings.
+- [ ] **Phase 5: Financial RAG & Human-in-the-Loop Review**: Hybrid vector search, financial ratio cross-checking, confidence-based review queue, SEC compliance audit logging.
+

@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AppShell } from '../src/components/layout/AppShell';
+import { AuthProvider } from '../src/context/AuthContext';
 
 const createTestQueryClient = () =>
   new QueryClient({
@@ -20,7 +21,9 @@ describe('AppShell', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter>
-          <AppShell />
+          <AuthProvider>
+            <AppShell />
+          </AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
     );

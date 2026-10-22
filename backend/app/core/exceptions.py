@@ -65,6 +65,66 @@ class ServiceUnavailableError(DocuFinException):
         )
 
 
+class UnauthorizedError(DocuFinException):
+    def __init__(self, message: str = "Authentication required.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="UNAUTHORIZED",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            details=details,
+        )
+
+
+class InvalidCredentialsError(DocuFinException):
+    def __init__(self, message: str = "Invalid email or password.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="INVALID_CREDENTIALS",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            details=details,
+        )
+
+
+class ForbiddenError(DocuFinException):
+    def __init__(self, message: str = "Access forbidden.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="FORBIDDEN",
+            status_code=status.HTTP_403_FORBIDDEN,
+            details=details,
+        )
+
+
+class RateLimitExceededError(DocuFinException):
+    def __init__(self, message: str = "Too many login attempts. Please try again later.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="RATE_LIMIT_EXCEEDED",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            details=details,
+        )
+
+
+class CSRFError(DocuFinException):
+    def __init__(self, message: str = "Invalid or missing CSRF token.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="CSRF_VERIFICATION_FAILED",
+            status_code=status.HTTP_403_FORBIDDEN,
+            details=details,
+        )
+
+
+class ValidationError(DocuFinException):
+    def __init__(self, message: str = "Validation failed.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="VALIDATION_ERROR",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            details=details,
+        )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Registers centralized exception handlers for the FastAPI application."""
 

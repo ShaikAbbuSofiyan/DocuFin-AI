@@ -1,6 +1,6 @@
 import json
 from functools import lru_cache
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,14 +25,27 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
-    # Security & CORS
+    # Security, JWT & Cookies
     secret_key: str = "development-secret-key-change-in-production-32bytes"
-    cors_origins: List[str] = [
+    jwt_secret_key: str = "development-jwt-secret-key-change-in-production-32bytes"
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 30
+    auth_cookie_name: str = "docufin_access_token"
+    csrf_cookie_name: str = "docufin_csrf_token"
+    auth_cookie_secure: bool = False
+    auth_cookie_samesite: str = "lax"
+    auth_cookie_domain: Optional[str] = None
+
+    # Rate Limiting Controls
+    rate_limit_login_attempts: int = 5
+    rate_limit_lockout_seconds: int = 300
+
+    cors_origins: Union[str, List[str]] = [
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
     ]
-    allowed_hosts: List[str] = ["*"]
+    allowed_hosts: Union[str, List[str]] = ["*"]
 
     # Database Configuration (PostgreSQL)
     postgres_user: str = "docufin_user"
@@ -54,16 +67,26 @@ class Settings(BaseSettings):
     redis_url: str | None = None
 
     # Storage Settings
-    upload_dir: str = "./uploads"
+    upload_dir: str = "./storage/documents"
+    storage_dir: str = "./storage/documents"
     max_upload_size_mb: int = 50
+    allowed_upload_extensions: List[str] = [".pdf", ".png", ".jpg", ".jpeg"]
+    allowed_upload_mime_types: List[str] = ["application/pdf", "image/png", "image/jpeg"]
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        return self.max_upload_size_mb * 1024 * 1024
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str) and not v.startswith("["):
+        if isinstance(v, str):
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
             return [i.strip() for i in v.split(",") if i.strip()]
-        elif isinstance(v, str) and v.startswith("["):
-            return json.loads(v)
         elif isinstance(v, list):
             return v
         return []
@@ -71,10 +94,13 @@ class Settings(BaseSettings):
     @field_validator("allowed_hosts", mode="before")
     @classmethod
     def assemble_allowed_hosts(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str) and not v.startswith("["):
+        if isinstance(v, str):
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
             return [i.strip() for i in v.split(",") if i.strip()]
-        elif isinstance(v, str) and v.startswith("["):
-            return json.loads(v)
         elif isinstance(v, list):
             return v
         return ["*"]
