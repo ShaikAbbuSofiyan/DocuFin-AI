@@ -1,11 +1,14 @@
 import math
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.file_validation import validate_file_content
 from app.core.logging import logger
 from app.models.document import Document, DocumentStatus
+from app.models.document_page import DocumentPage
+from app.models.processing_job import JobStatus, ProcessingJob, ProcessingStage
 from app.models.user import User
 from app.repositories.document_repo import DocumentRepository
 from app.schemas.document import (
@@ -13,8 +16,14 @@ from app.schemas.document import (
     DocumentUpdate,
     PaginatedDocumentResponse,
 )
+from app.schemas.processing import (
+    DocumentExtractedTextResponse,
+    DocumentPageResponse,
+    ProcessingJobResponse,
+)
 from app.services.storage import get_storage_service
 from app.services.storage.base import StorageService
+from app.workers.document_tasks import process_document_task
 
 
 class DocumentService:
@@ -192,3 +201,150 @@ class DocumentService:
             f"Document removed successfully: id={doc_id}, org={org_id}, title={doc_title}"
         )
         return doc_title
+
+    async def queue_document_processing(
+        self,
+        doc_id: str,
+        org_id: str,
+        force_reprocess: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> ProcessingJob:
+        """
+        Submits an authorized document for asynchronous text extraction and OCR.
+        Enforces idempotency, tenant boundaries, and deduplication.
+        """
+        doc = await self.get_document(doc_id, org_id)
+
+        # 1. Idempotency Key check: if specified, check for existing job with same key
+        if idempotency_key:
+            stmt = select(ProcessingJob).where(
+                ProcessingJob.idempotency_key == idempotency_key,
+                ProcessingJob.organization_id == org_id,
+            )
+            res = await self.db.execute(stmt)
+            existing_key_job = res.scalar_one_or_none()
+            if existing_key_job:
+                logger.info(
+                    f"Idempotent processing match for key={idempotency_key}, job_id={existing_key_job.id}"
+                )
+                return existing_key_job
+
+        # 2. Check for active (PENDING/PROCESSING/RETRYING) jobs
+        active_stmt = select(ProcessingJob).where(
+            ProcessingJob.document_id == doc_id,
+            ProcessingJob.organization_id == org_id,
+            ProcessingJob.status.in_([
+                JobStatus.PENDING.value,
+                JobStatus.PROCESSING.value,
+                JobStatus.RETRYING.value,
+            ]),
+        ).order_by(ProcessingJob.created_at.desc())
+        active_res = await self.db.execute(active_stmt)
+        active_job = active_res.scalar_one_or_none()
+
+        if active_job and not force_reprocess:
+            logger.info(f"Returning active processing job {active_job.id} for document {doc_id}")
+            return active_job
+
+        # 3. Check if document is already completed and force_reprocess is False
+        if not force_reprocess and doc.status in (DocumentStatus.REVIEW_REQUIRED.value, DocumentStatus.APPROVED.value):
+            completed_stmt = select(ProcessingJob).where(
+                ProcessingJob.document_id == doc_id,
+                ProcessingJob.organization_id == org_id,
+                ProcessingJob.status == JobStatus.COMPLETED.value,
+            ).order_by(ProcessingJob.created_at.desc())
+            completed_res = await self.db.execute(completed_stmt)
+            completed_job = completed_res.scalar_one_or_none()
+            if completed_job:
+                return completed_job
+
+        # 4. Create new ProcessingJob entity
+        job_id = str(uuid.uuid4())
+        job = ProcessingJob(
+            id=job_id,
+            document_id=doc.id,
+            organization_id=org_id,
+            status=JobStatus.PENDING.value,
+            stage=ProcessingStage.QUEUED.value,
+            attempts=0,
+            max_attempts=3,
+            idempotency_key=idempotency_key,
+            extra_metadata={"queued_by": "api"},
+        )
+        self.db.add(job)
+        doc.status = DocumentStatus.QUEUED.value
+        await self.db.commit()
+        await self.db.refresh(job)
+
+        # 5. Dispatch Celery task
+        try:
+            task = process_document_task.delay(job_id=job.id, document_id=doc.id)
+            job.celery_task_id = task.id
+            await self.db.commit()
+            await self.db.refresh(job)
+        except Exception as queue_err:
+            logger.warning(
+                f"Celery broker dispatch failed (worker might be offline or in local test mode): {str(queue_err)}"
+            )
+
+        logger.info(f"Document processing queued: job_id={job.id}, doc_id={doc.id}")
+        return job
+
+    async def get_processing_jobs(
+        self, doc_id: str, org_id: str
+    ) -> List[ProcessingJob]:
+        """Queries all processing jobs for a document in org."""
+        await self.get_document(doc_id, org_id)
+        stmt = (
+            select(ProcessingJob)
+            .where(
+                ProcessingJob.document_id == doc_id,
+                ProcessingJob.organization_id == org_id,
+            )
+            .order_by(ProcessingJob.created_at.desc())
+        )
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def get_processing_job(
+        self, doc_id: str, job_id: str, org_id: str
+    ) -> ProcessingJob:
+        """Retrieves a single processing job with strict tenant scoping."""
+        await self.get_document(doc_id, org_id)
+        stmt = select(ProcessingJob).where(
+            ProcessingJob.id == job_id,
+            ProcessingJob.document_id == doc_id,
+            ProcessingJob.organization_id == org_id,
+        )
+        res = await self.db.execute(stmt)
+        job = res.scalar_one_or_none()
+        if not job:
+            raise NotFoundError("Processing Job", job_id)
+        return job
+
+    async def get_extracted_pages(
+        self, doc_id: str, org_id: str
+    ) -> DocumentExtractedTextResponse:
+        """Retrieves structured, page-ordered text extractions and OCR indicators."""
+        doc = await self.get_document(doc_id, org_id)
+        stmt = (
+            select(DocumentPage)
+            .where(DocumentPage.document_id == doc_id)
+            .order_by(DocumentPage.page_number.asc())
+        )
+        res = await self.db.execute(stmt)
+        pages = list(res.scalars().all())
+
+        page_responses = [DocumentPageResponse.model_validate(p) for p in pages]
+        total_words = sum(p.word_count for p in page_responses)
+        total_chars = sum(p.char_count for p in page_responses)
+        ocr_applied = any(p.ocr_applied for p in page_responses)
+
+        return DocumentExtractedTextResponse(
+            document_id=doc_id,
+            total_pages=len(page_responses),
+            total_words=total_words,
+            total_chars=total_chars,
+            ocr_applied=ocr_applied,
+            pages=page_responses,
+        )

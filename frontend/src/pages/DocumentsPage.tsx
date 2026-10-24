@@ -12,9 +12,11 @@ import {
   Search,
   Shield,
   Trash2,
+  Cpu,
 } from 'lucide-react';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { DocumentPreviewModal } from '../components/documents/DocumentPreviewModal';
+import { DocumentProcessingModal } from '../components/documents/DocumentProcessingModal';
 import { DocumentUploadModal } from '../components/documents/DocumentUploadModal';
 import { useAuth } from '../context/AuthContext';
 import { apiClient } from '../services/api';
@@ -44,6 +46,8 @@ export const DocumentsPage: React.FC = () => {
   const [isUploadModalOpen, setIsUploadModalOpen] = useState<boolean>(false);
   const [selectedDocument, setSelectedDocument] = useState<DocumentItem | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState<boolean>(false);
+  const [selectedProcessingDoc, setSelectedProcessingDoc] = useState<DocumentItem | null>(null);
+  const [isProcessingOpen, setIsProcessingOpen] = useState<boolean>(false);
 
   // Permissions
   const canUpload =
@@ -99,6 +103,11 @@ export const DocumentsPage: React.FC = () => {
   const openPreview = (doc: DocumentItem) => {
     setSelectedDocument(doc);
     setIsPreviewOpen(true);
+  };
+
+  const openProcessing = (doc: DocumentItem) => {
+    setSelectedProcessingDoc(doc);
+    setIsProcessingOpen(true);
   };
 
   const formatFileSize = (bytes: number): string => {
@@ -411,6 +420,19 @@ export const DocumentsPage: React.FC = () => {
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
+                          onClick={() => openProcessing(doc)}
+                          className={`p-1.5 rounded-lg transition ${
+                            doc.status === 'PROCESSING' || doc.status === 'QUEUED'
+                              ? 'text-indigo-400 bg-indigo-500/10 animate-pulse'
+                              : doc.status === 'FAILED'
+                              ? 'text-rose-400 bg-rose-500/10'
+                              : 'text-slate-400 hover:text-indigo-400 hover:bg-slate-800'
+                          }`}
+                          title="Processing & OCR Telemetry / Extracted Text"
+                        >
+                          <Cpu className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => openPreview(doc)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition"
                           title="Preview Document"
@@ -492,6 +514,16 @@ export const DocumentsPage: React.FC = () => {
         }}
         onDelete={handleDelete}
         canDelete={canDelete}
+      />
+
+      <DocumentProcessingModal
+        document={selectedProcessingDoc}
+        isOpen={isProcessingOpen}
+        onClose={() => {
+          setIsProcessingOpen(false);
+          setSelectedProcessingDoc(null);
+        }}
+        onStatusChange={fetchDocuments}
       />
     </div>
   );

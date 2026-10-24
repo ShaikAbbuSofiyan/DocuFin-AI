@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
@@ -30,6 +29,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as non-privileged application user
@@ -38,6 +39,10 @@ RUN groupadd -r docufin && useradd -r -g docufin -m -d /home/docufin docufin
 COPY --from=builder /root/.local /home/docufin/.local
 
 COPY --chown=docufin:docufin . /app
+
+# Ensure storage directories exist with non-root ownership
+RUN mkdir -p /app/storage/documents /app/uploads /home/docufin/storage \
+    && chown -R docufin:docufin /app /home/docufin
 
 USER docufin
 

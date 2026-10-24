@@ -1,10 +1,12 @@
-"""DocuFin Background Workers Module.
+"""DocuFin Background Workers Module."""
+from app.workers.document_tasks import (
+    execute_processing_job,
+    process_document_task,
+    recover_stale_jobs,
+)
 
-This module will house:
-- Celery / ARQ / Taskiq worker configurations
-- Asynchronous document OCR & chunking tasks
-- Embedding generation and vector sync tasks
-- Scheduled report generation and cleanup tasks
-
-Reserved for Phase 2+.
-"""
+__all__ = [
+    "process_document_task",
+    "execute_processing_job",
+    "recover_stale_jobs",
+]

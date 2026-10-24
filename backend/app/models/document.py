@@ -59,3 +59,9 @@ class Document(Base, TimestampMixin):
 
     organization: Mapped[Optional["Organization"]] = relationship("Organization", back_populates="documents")
     uploader: Mapped[Optional["User"]] = relationship("User")
+    processing_jobs: Mapped[list["ProcessingJob"]] = relationship(
+        "ProcessingJob", back_populates="document", cascade="all, delete-orphan", order_by="desc(ProcessingJob.created_at)"
+    )
+    pages: Mapped[list["DocumentPage"]] = relationship(
+        "DocumentPage", back_populates="document", cascade="all, delete-orphan", order_by="DocumentPage.page_number"
+    )

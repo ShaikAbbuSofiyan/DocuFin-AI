@@ -203,4 +203,34 @@ export const apiClient = {
 
   getDocumentPreviewUrl: (id: string) => `${BASE_URL}/api/v1/documents/${id}/preview`,
   getDocumentDownloadUrl: (id: string) => `${BASE_URL}/api/v1/documents/${id}/download`,
+
+  // Phase 4: Async Processing, OCR, and Status Polling
+  processDocument: (id: string, forceReprocess = false, idempotencyKey?: string) =>
+    request<import('../types/document').ProcessingJob>(`/api/v1/documents/${id}/process`, {
+      method: 'POST',
+      body: JSON.stringify({
+        force_reprocess: forceReprocess,
+        idempotency_key: idempotencyKey,
+      }),
+    }),
+
+  retryDocument: (id: string) =>
+    request<import('../types/document').ProcessingJob>(`/api/v1/documents/${id}/retry`, {
+      method: 'POST',
+    }),
+
+  getProcessingJobs: (docId: string) =>
+    request<import('../types/document').ProcessingJob[]>(
+      `/api/v1/documents/${docId}/processing-jobs`
+    ),
+
+  getProcessingJobStatus: (docId: string, jobId: string) =>
+    request<import('../types/document').ProcessingJob>(
+      `/api/v1/documents/${docId}/processing-jobs/${jobId}`
+    ),
+
+  getDocumentExtractedText: (docId: string) =>
+    request<import('../types/document').DocumentExtractedTextResponse>(
+      `/api/v1/documents/${docId}/extracted-text`
+    ),
 };

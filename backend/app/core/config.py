@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_url: str | None = None
 
+    # Celery & Asynchronous Task Processing (Phase 4)
+    celery_broker_url: str | None = None
+    celery_result_backend: str | None = None
+    max_document_pages: int = 100
+    processing_timeout_seconds: int = 300
+    ocr_min_words_threshold: int = 20
+
     # Storage Settings
     upload_dir: str = "./storage/documents"
     storage_dir: str = "./storage/documents"
@@ -133,6 +140,22 @@ class Settings(BaseSettings):
             return self.redis_url
         auth = f":{self.redis_password}@" if self.redis_password else ""
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def celery_broker_connection_url(self) -> str:
+        """Returns Celery message broker URL."""
+        if self.celery_broker_url:
+            return self.celery_broker_url
+        base = self.redis_connection_url.rsplit("/", 1)[0]
+        return f"{base}/1"
+
+    @property
+    def celery_result_connection_url(self) -> str:
+        """Returns Celery result backend URL."""
+        if self.celery_result_backend:
+            return self.celery_result_backend
+        base = self.redis_connection_url.rsplit("/", 1)[0]
+        return f"{base}/2"
 
 
 @lru_cache()

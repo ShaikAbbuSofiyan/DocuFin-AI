@@ -33,7 +33,13 @@ from app.schemas.document import (
     DocumentUpdate,
     PaginatedDocumentResponse,
 )
+from app.schemas.processing import (
+    DocumentExtractedTextResponse,
+    ProcessingJobResponse,
+    ProcessingJobTriggerRequest,
+)
 from app.services.document_service import DocumentService
+from app.workers.document_tasks import recover_stale_jobs
 
 router = APIRouter()
 
@@ -507,3 +513,161 @@ async def delete_org_document_legacy(
     service = DocumentService(db)
     title = await service.delete_document(doc_id=doc_id, org_id=org_id)
     return MessageResponse(message=f"Document '{title}' deleted successfully.")
+
+
+# ==============================================================================
+# Phase 4: Asynchronous Processing & OCR Endpoints
+# ==============================================================================
+
+@router.post(
+    "/documents/{doc_id}/process",
+    response_model=ProcessingJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue asynchronous text extraction and OCR job",
+)
+async def process_document_endpoint(
+    doc_id: str,
+    payload: Optional[ProcessingJobTriggerRequest] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Submits an uploaded document to Celery background worker for PDF digital text
+    extraction and Tesseract OCR on scanned pages.
+    Guarantees bounded retries, distributed deduplication, and idempotency.
+    Requires Admin or Analyst role in the document's organization.
+    """
+    doc, mem = await verify_document_access(doc_id, current_user, db)
+    if mem and mem.role.lower() not in [
+        OrganizationRole.ADMIN.value.lower(),
+        OrganizationRole.ANALYST.value.lower(),
+    ] and not current_user.is_superuser:
+        raise ForbiddenError("Only Administrators and Analysts can trigger document processing.")
+
+    service = DocumentService(db)
+    force = payload.force_reprocess if payload else False
+    idempotency_key = payload.idempotency_key if payload else None
+
+    job = await service.queue_document_processing(
+        doc_id=doc.id,
+        org_id=doc.organization_id,
+        force_reprocess=force,
+        idempotency_key=idempotency_key,
+    )
+    return job
+
+
+@router.get(
+    "/documents/{doc_id}/processing-jobs",
+    response_model=List[ProcessingJobResponse],
+    summary="List all processing jobs for a document",
+)
+async def list_document_processing_jobs(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lists processing job history with timestamps, attempts, durations, and errors."""
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = DocumentService(db)
+    jobs = await service.get_processing_jobs(doc_id=doc.id, org_id=doc.organization_id)
+    return jobs
+
+
+@router.get(
+    "/documents/{doc_id}/processing-jobs/{job_id}",
+    response_model=ProcessingJobResponse,
+    summary="Poll status of a specific document processing job",
+)
+async def get_document_processing_job_status(
+    doc_id: str,
+    job_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint for frontend status polling.
+    Returns status (PENDING, PROCESSING, RETRYING, COMPLETED, FAILED),
+    stage progress, attempt count, duration in ms, and any error message.
+    """
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = DocumentService(db)
+    job = await service.get_processing_job(
+        doc_id=doc.id, job_id=job_id, org_id=doc.organization_id
+    )
+    return job
+
+
+@router.post(
+    "/documents/{doc_id}/retry",
+    response_model=ProcessingJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Failed-job recovery: Re-queue processing for a failed document",
+)
+async def retry_document_processing(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Forces re-queueing of a failed or stuck document processing job."""
+    doc, mem = await verify_document_access(doc_id, current_user, db)
+    if mem and mem.role.lower() not in [
+        OrganizationRole.ADMIN.value.lower(),
+        OrganizationRole.ANALYST.value.lower(),
+    ] and not current_user.is_superuser:
+        raise ForbiddenError("Only Administrators and Analysts can retry document processing.")
+
+    service = DocumentService(db)
+    job = await service.queue_document_processing(
+        doc_id=doc.id,
+        org_id=doc.organization_id,
+        force_reprocess=True,
+    )
+    return job
+
+
+@router.get(
+    "/documents/{doc_id}/extracted-text",
+    response_model=DocumentExtractedTextResponse,
+    summary="Retrieve extracted text and OCR data preserving page numbers",
+)
+async def get_document_extracted_text(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retrieves complete page-by-page extracted text, word counts, char counts,
+    and OCR indicators for verification and downstream financial research.
+    """
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = DocumentService(db)
+    extracted = await service.get_extracted_pages(doc_id=doc.id, org_id=doc.organization_id)
+    return extracted
+
+
+@router.post(
+    "/documents/recover-stale-jobs",
+    response_model=MessageResponse,
+    summary="Trigger failed-job recovery mechanism for stale worker jobs",
+)
+async def recover_stale_jobs_endpoint(
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Failed-job recovery mechanism:
+    Scans for jobs stuck in PROCESSING longer than threshold (e.g. following worker crash or reboot)
+    and resets them to FAILED so they can be gracefully retried.
+    """
+    if not current_user.is_superuser:
+        # Check if user is admin in any org
+        has_admin = any(
+            m.is_active and m.role.lower() == OrganizationRole.ADMIN.value.lower()
+            for m in current_user.memberships
+        )
+        if not has_admin:
+            raise ForbiddenError("Administrator privileges required to invoke job recovery.")
+
+    count = await recover_stale_jobs(db_session=db)
+    return MessageResponse(message=f"Recovery scan completed. {count} stale jobs updated.")
