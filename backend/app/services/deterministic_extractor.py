@@ -468,21 +468,28 @@ class DeterministicExtractor:
 
     @classmethod
     def _extract_vendor(cls, text: str) -> Tuple[Optional[str], Optional[str]]:
-        # Check explicit patterns
+        # Heuristic 1: Check first 3 lines for company entity suffix (Inc, LLC, Corp, Ltd, etc.)
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        for line in lines[:3]:
+            if any(k in line.lower() for k in ["invoice", "tax invoice", "statement", "receipt", "page", "bill to"]):
+                continue
+            if re.search(r"(?i)\b(?:Inc|LLC|Corp|Ltd|Co|Solutions|Technologies|Services|Group)\b", line):
+                return line.strip(",."), line
+
+        # Heuristic 2: Check explicit patterns
         for pattern in cls.VENDOR_PATTERNS:
-            match = re.search(pattern, text)
+            match = re.search(pattern, text, re.MULTILINE)
             if match:
-                v = match.group(1).strip().strip(",")
+                v = match.group(1).strip().strip(",.")
                 if len(v) > 2 and not any(k in v.lower() for k in ["invoice", "date", "bill to", "tax"]):
                     return v, match.group(0).strip()
 
-        # Heuristic: First clean non-header line that looks like a company name
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        # Heuristic 3: First clean non-header line that looks like an organization name
         for line in lines[:5]:
-            if any(k in line.lower() for k in ["invoice", "tax invoice", "statement", "receipt", "page"]):
+            if any(k in line.lower() for k in ["invoice", "tax invoice", "statement", "receipt", "page", "bill to"]):
                 continue
             if len(line) >= 3 and len(line) <= 50 and not re.match(r"^\d", line):
-                return line, line
+                return line.strip(",."), line
 
         return None, None
 
