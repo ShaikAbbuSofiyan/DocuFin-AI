@@ -101,7 +101,7 @@ export interface DocumentExtractionResponse {
   needs_review: boolean;
   review_reasons: string[];
   is_valid: boolean;
-  validation_errors: string[];
+  validation_errors: (string | ValidationRuleResult)[];
   status: ExtractionStatus;
   created_at: string;
   updated_at: string;
@@ -125,4 +125,38 @@ export interface ReviewQueueItem {
   created_at: string;
   total_amount?: number | null;
   currency?: string | null;
+}
+
+export type ValidationSeverity = 'ERROR' | 'WARNING' | 'INFO';
+
+export interface ValidationRuleResult {
+  rule_id: string;
+  rule_name: string;
+  severity: ValidationSeverity;
+  is_passed: boolean;
+  explanation: string;
+  affected_fields: string[];
+}
+
+export interface ValidationSummary {
+  is_valid: boolean;
+  has_warnings: boolean;
+  error_count: number;
+  warning_count: number;
+  info_count: number;
+  results: ValidationRuleResult[];
+}
+
+export interface ValidationRunResponse {
+  id: string;
+  document_id: string;
+  extraction_id?: string | null;
+  organization_id: string;
+  triggered_by: string;
+  is_valid: boolean;
+  error_count: number;
+  warning_count: number;
+  info_count: number;
+  results: ValidationRuleResult[];
+  created_at: string;
 }

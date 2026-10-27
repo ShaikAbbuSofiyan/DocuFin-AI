@@ -9,6 +9,8 @@ from app.models.organization import Organization
 from app.models.processing_job import JobStatus, ProcessingJob, ProcessingStage
 from app.models.user import User
 
+from app.models.validation_history import ValidationRun, ValidationSeverity
+
 __all__ = [
     "Base",
     "Document",
@@ -23,4 +25,7 @@ __all__ = [
     "Organization",
     "OrganizationMembership",
     "OrganizationRole",
+    "ValidationRun",
+    "ValidationSeverity",
 ]
+

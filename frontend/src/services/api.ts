@@ -276,4 +276,28 @@ export const apiClient = {
         method: 'POST',
       }
     ),
+
+  // Phase 6: Financial Business Rules & Validation Engine
+  validateDocumentExtraction: (
+    docId: string,
+    options?: { rounding_tolerance?: number; strict_mode?: boolean }
+  ) =>
+    request<import('../types/extraction').ValidationSummary>(
+      `/api/v1/documents/${docId}/validate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(options || {}),
+      }
+    ),
+
+  getLatestValidation: (docId: string) =>
+    request<import('../types/extraction').ValidationRunResponse>(
+      `/api/v1/documents/${docId}/validation-latest`
+    ),
+
+  getValidationHistory: (docId: string) =>
+    request<import('../types/extraction').ValidationRunResponse[]>(
+      `/api/v1/documents/${docId}/validation-history`
+    ),
 };
+

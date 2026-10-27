@@ -27,8 +27,11 @@ from app.schemas.extraction import (
     normalize_date,
     normalize_numeric,
 )
+from app.models.validation_history import ValidationRun, ValidationSeverity
+from app.schemas.validation import ValidationRuleResult, ValidationSummary
 from app.services.classification_service import DocumentClassificationService
 from app.services.deterministic_extractor import DeterministicExtractor, find_source_page
+from app.services.validation_engine import FinancialValidationEngine
 
 logger = logging.getLogger("docufin.services.extraction_service")
 
@@ -153,21 +156,43 @@ class FinancialExtractionService:
             page_texts=page_texts,
         )
 
-        # 6. Overall Confidence & Review Routing
+        # 6. Financial Business Rules & Validation Engine Execution (Phase 6)
+        validation_engine = FinancialValidationEngine(
+            rounding_tolerance=self.settings.validation_rounding_tolerance,
+            default_currency_precision=self.settings.validation_default_currency_precision,
+            strict_mode=self.settings.validation_strict_mode,
+        )
+        val_summary, validation_run = await validation_engine.validate_document_extraction(
+            db=self.db,
+            document_id=doc.id,
+            organization_id=doc.organization_id,
+            document_type=target_type.value,
+            extracted_data=final_dict,
+            triggered_by="EXTRACTION",
+        )
+
+        for res in val_summary.results:
+            if not res.is_passed:
+                if res.severity == ValidationSeverity.ERROR:
+                    review_reasons.append(f"[{res.rule_id}] {res.explanation}")
+                    validation_errors.append(f"[{res.rule_id}] {res.explanation}")
+                elif res.severity == ValidationSeverity.WARNING:
+                    review_reasons.append(f"[{res.rule_id} WARNING] {res.explanation}")
+
+        # Overall Confidence & Review Routing
         valid_confidences = [
             fm.confidence for fm in field_meta.values() if fm.value is not None
         ]
         avg_confidence = (
             sum(valid_confidences) / len(valid_confidences) if valid_confidences else 0.50
         )
-        # Confidence penalty if math discrepancy or validation errors
-        if review_reasons or validation_errors:
-            avg_confidence = max(0.20, avg_confidence - 0.25)
+        if not val_summary.is_valid or val_summary.has_warnings:
+            avg_confidence = max(0.20, avg_confidence - 0.20)
 
         needs_review = (
             avg_confidence < self.settings.extraction_confidence_threshold
+            or not val_summary.is_valid
             or len(review_reasons) > 0
-            or len(validation_errors) > 0
         )
 
         extraction_status = (
@@ -201,12 +226,16 @@ class FinancialExtractionService:
             confidence_score=round(avg_confidence, 2),
             needs_review=needs_review,
             review_reasons=review_reasons,
-            is_valid=(len(validation_errors) == 0),
-            validation_errors=validation_errors,
+            is_valid=val_summary.is_valid,
+            validation_errors=[r.model_dump() for r in val_summary.results],
             status=extraction_status,
         )
 
         self.db.add(extraction)
+        await self.db.flush()
+
+        # Link validation history record to this extraction
+        validation_run.extraction_id = extraction.id
 
         # Update Document's classification and processing status
         doc.doc_type = target_type.value
@@ -417,6 +446,25 @@ class FinancialExtractionService:
                 current_meta[k] = meta_item
         extraction.field_metadata = current_meta
 
+        # Re-run Financial Validation Engine on updated data (Phase 6)
+        validation_engine = FinancialValidationEngine(
+            rounding_tolerance=self.settings.validation_rounding_tolerance,
+            default_currency_precision=self.settings.validation_default_currency_precision,
+            strict_mode=self.settings.validation_strict_mode,
+        )
+        val_summary, validation_run = await validation_engine.validate_document_extraction(
+            db=self.db,
+            document_id=doc_id,
+            organization_id=org_id,
+            document_type=extraction.document_type,
+            extracted_data=current_data,
+            extraction_id=extraction.id,
+            triggered_by="MANUAL_CORRECTION",
+        )
+
+        extraction.is_valid = val_summary.is_valid
+        extraction.validation_errors = [r.model_dump() for r in val_summary.results]
+
         # Status update
         if payload.status:
             extraction.status = payload.status
@@ -436,6 +484,9 @@ class FinancialExtractionService:
                 doc = doc_res.scalar_one_or_none()
                 if doc:
                     doc.status = DocumentStatus.REJECTED.value
+        elif not val_summary.is_valid:
+            extraction.needs_review = True
+            extraction.status = ExtractionStatus.REVIEW_REQUIRED.value
 
         if payload.analyst_notes:
             extraction.analyst_notes = payload.analyst_notes
@@ -446,6 +497,82 @@ class FinancialExtractionService:
         await self.db.commit()
         await self.db.refresh(extraction)
         return extraction
+
+    async def revalidate_extraction(
+        self,
+        doc_id: str,
+        org_id: str,
+        rounding_tolerance: Optional[float] = None,
+        strict_mode: Optional[bool] = None,
+    ) -> Tuple[ValidationSummary, ValidationRun]:
+        """
+        Executes on-demand deterministic business rule validation for an extraction
+        and appends an immutable ValidationRun entry to validation history.
+        """
+        extraction = await self.get_extraction(doc_id, org_id)
+        if not extraction:
+            raise NotFoundError("DocumentExtraction for document", doc_id)
+
+        engine = FinancialValidationEngine(
+            rounding_tolerance=rounding_tolerance or self.settings.validation_rounding_tolerance,
+            default_currency_precision=self.settings.validation_default_currency_precision,
+            strict_mode=strict_mode if strict_mode is not None else self.settings.validation_strict_mode,
+        )
+
+        val_summary, val_run = await engine.validate_document_extraction(
+            db=self.db,
+            document_id=doc_id,
+            organization_id=org_id,
+            document_type=extraction.document_type,
+            extracted_data=extraction.extracted_data or {},
+            extraction_id=extraction.id,
+            triggered_by="API_REVALIDATE",
+        )
+
+        extraction.is_valid = val_summary.is_valid
+        extraction.validation_errors = [r.model_dump() for r in val_summary.results]
+        if not val_summary.is_valid:
+            extraction.needs_review = True
+            extraction.status = ExtractionStatus.REVIEW_REQUIRED.value
+
+        await self.db.commit()
+        await self.db.refresh(extraction)
+        return val_summary, val_run
+
+    async def get_validation_history(
+        self,
+        doc_id: str,
+        org_id: str,
+    ) -> List[ValidationRun]:
+        """Fetches chronological historical audit records of validation runs for a document."""
+        query = (
+            select(ValidationRun)
+            .where(
+                ValidationRun.document_id == doc_id,
+                ValidationRun.organization_id == org_id,
+            )
+            .order_by(desc(ValidationRun.created_at))
+        )
+        res = await self.db.execute(query)
+        return list(res.scalars().all())
+
+    async def get_latest_validation(
+        self,
+        doc_id: str,
+        org_id: str,
+    ) -> Optional[ValidationRun]:
+        """Retrieves the most recent validation run record for a document."""
+        query = (
+            select(ValidationRun)
+            .where(
+                ValidationRun.document_id == doc_id,
+                ValidationRun.organization_id == org_id,
+            )
+            .order_by(desc(ValidationRun.created_at))
+            .limit(1)
+        )
+        res = await self.db.execute(query)
+        return res.scalar_one_or_none()
 
     async def get_review_queue(
         self,

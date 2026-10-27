@@ -45,6 +45,11 @@ from app.schemas.extraction import (
     ReviewQueueItem,
     TriggerExtractionRequest,
 )
+from app.schemas.validation import (
+    TriggerValidationRequest,
+    ValidationRunResponse,
+    ValidationSummary,
+)
 from app.services.document_service import DocumentService
 from app.services.extraction_service import FinancialExtractionService
 from app.workers.document_tasks import recover_stale_jobs
@@ -815,3 +820,70 @@ async def classify_document_endpoint(
     full_text = "\n".join(p.text_content for p in pages.pages)
     service = FinancialExtractionService(db)
     return await service.llm_provider.classify_document(full_text)
+
+
+# ==============================================================================
+# Financial Business Rules & Validation Engine Endpoints (Phase 6)
+# ==============================================================================
+
+@router.post(
+    "/documents/{doc_id}/validate",
+    response_model=ValidationSummary,
+    summary="Trigger on-demand deterministic business rule validation",
+)
+async def validate_document_endpoint(
+    doc_id: str,
+    payload: Optional[TriggerValidationRequest] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Executes high-precision decimal arithmetic checks, mandatory field validations,
+    ledger reconciliations, duplicate detection, and records an immutable historical run.
+    """
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = FinancialExtractionService(db)
+    tol = payload.rounding_tolerance if payload else None
+    strict = payload.strict_mode if payload else None
+    summary, _ = await service.revalidate_extraction(
+        doc_id=doc.id,
+        org_id=doc.organization_id,
+        rounding_tolerance=tol,
+        strict_mode=strict,
+    )
+    return summary
+
+
+@router.get(
+    "/documents/{doc_id}/validation-latest",
+    response_model=ValidationRunResponse,
+    summary="Get the most recent validation run results and rule details",
+)
+async def get_latest_validation_endpoint(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieves the latest validation run for the document."""
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = FinancialExtractionService(db)
+    val_run = await service.get_latest_validation(doc_id=doc.id, org_id=doc.organization_id)
+    if not val_run:
+        raise NotFoundError("ValidationRun for document", doc_id)
+    return val_run
+
+
+@router.get(
+    "/documents/{doc_id}/validation-history",
+    response_model=List[ValidationRunResponse],
+    summary="Get chronological history of all validation runs for a document",
+)
+async def get_validation_history_endpoint(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns chronological audit trail of all automated and manual validation runs."""
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = FinancialExtractionService(db)
+    return await service.get_validation_history(doc_id=doc.id, org_id=doc.organization_id)

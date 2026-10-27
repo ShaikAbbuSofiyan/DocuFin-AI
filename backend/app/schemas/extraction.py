@@ -412,7 +412,7 @@ class DocumentExtractionResponse(BaseModel):
     needs_review: bool
     review_reasons: List[str]
     is_valid: bool
-    validation_errors: List[str]
+    validation_errors: List[Union[str, Dict[str, Any]]] = Field(default_factory=list)
     status: str
     created_at: datetime
     updated_at: datetime

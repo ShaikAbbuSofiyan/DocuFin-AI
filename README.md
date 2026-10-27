@@ -577,6 +577,70 @@ Synthetic documents with ground truth evaluated against the extraction engine yi
 
 ---
 
+---
+
+## Phase 6: Financial Business Rules and Validation Engine
+
+DocuFin AI implements a deterministic financial validation engine operating independently of LLMs. All mathematical and ledger checks are evaluated using Python's `Decimal` arithmetic (`ROUND_HALF_UP`) to prevent IEEE 754 floating-point rounding errors.
+
+### Core Architecture & Validation Capabilities
+
+1. **High-Precision Decimal Arithmetic**:
+   - Replaces binary floating-point operations with exact Decimal representation for monetary reconciliations.
+   - Configurable rounding tolerance via `validation_rounding_tolerance` (default $\pm0.05$).
+2. **Three-Tiered Severity Classification**:
+   - `ERROR`: Critical business rule failure (e.g. mandatory field missing, due date preceding invoice date, subtotal/tax/total discrepancy, broken bank ledger, duplicate invoice). Blocks automated sign-off and routes document to `REVIEW_REQUIRED`.
+   - `WARNING`: Discrepancy or unusual pattern (e.g. line item sum mismatch, future-dated invoices, superfluous currency decimal precision, negative amounts / credit notes).
+   - `INFO`: Informational confirmation of compliant values (e.g. unique invoice identifier, verified currency precision).
+3. **Mandatory Fields Validation**:
+   - Invoices: Asserts presence of `invoice_number`, `vendor`, `invoice_date`, and `total`.
+   - Bank Statements: Asserts presence of `opening_balance` and `closing_balance`.
+   - Expense Reports: Asserts presence of `amount`, `currency`, `expense_date`, and `merchant`.
+4. **Date Formats and Temporal Relationships**:
+   - Validates ISO 8601 `YYYY-MM-DD` conformance.
+   - Verifies that invoice due date is on or after the issue date (`due_date >= invoice_date`).
+   - Verifies statement period start and end dates (`start_date <= end_date`).
+   - Flags historical outliers (< year 1990) and future dates (> 90 days ahead).
+5. **Invoice Reconciliation**:
+   - Asserts $|\text{total} - (\text{subtotal} + \text{tax})| \le \text{tolerance}$.
+   - Asserts $|\sum\text{line\_items} - \text{subtotal}| \le \text{tolerance}$.
+6. **Transaction Debit/Credit Representation**:
+   - Enforces mutual exclusivity: debits and credits cannot both be populated with non-zero amounts on the same line.
+   - Enforces non-negative values ($>= 0$).
+   - Flags transactions where neither debit nor credit is populated.
+7. **Bank Running Balance & Closing Ledger Reconciliation**:
+   - Verifies step-by-step consecutive transaction running balances: $\text{bal}_i = \text{bal}_{i-1} + \text{credit}_i - \text{debit}_i$.
+   - Reconciles closing ledger balance: $|\text{opening} + \sum\text{credits} - \sum\text{debits} - \text{closing}| \le \text{tolerance}$.
+8. **Organization-Scoped Duplicate Invoice Identifier Detection**:
+   - Automatically checks existing extractions in the same organization for identical `vendor` and `invoice_number` combinations across different documents.
+9. **Configurable Currency Precision**:
+   - Maps standard ISO 4217 currency codes to expected fractional precision (0 decimals for `JPY`/`KRW`, 3 decimals for `KWD`/`BHD`/`OMR`, 2 decimals for `USD`/`EUR`/`GBP`/`INR`).
+   - Flags fractional cent overflow as a precision warning.
+10. **Immutable Validation History**:
+    - Every automated run and manual re-validation is recorded as a `ValidationRun` entry linked to the document and organization, preserving an audit trail of rule pass/fail states over time.
+11. **Continuous Re-Validation on Authorized Corrections**:
+    - When an analyst updates extracted fields (`PATCH /documents/{doc_id}/extraction`), the validation engine automatically re-evaluates the document, updates `is_valid`, and logs a `MANUAL_CORRECTION` validation run.
+12. **Neutral, Non-Accusatory Rule Explanations**:
+    - Adheres to the principle: *Do not treat a rule violation as proof of fraud or misconduct.* Explanations are framed constructively (e.g., "Mathematical discrepancy", "Data mismatch", "Requires verification").
+
+### Key API Endpoints (Phase 6)
+
+| Method | Endpoint | Description | Role / Auth |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/documents/{doc_id}/validate` | Trigger on-demand business rule validation | Member |
+| `GET` | `/api/v1/documents/{doc_id}/validation-latest` | Get latest validation run and rule breakdown | Member |
+| `GET` | `/api/v1/documents/{doc_id}/validation-history` | Get chronological history of all validation runs | Member |
+
+### Frontend Validation Workspace
+
+* **Side-by-Side Dual-Panel Layout**: Extracted financial form displayed beside the live **Validation Rules Engine** panel in the `DocumentExtractionModal`.
+* **Interactive Severity Filter**: Toggle between `All`, `Errors`, `Warnings`, and `Info` rule evaluations.
+* **Granular Rule Cards**: Displays rule ID, severity badge, pass/fail state, detailed neutral explanation, and affected fields tags.
+* **On-Demand Re-Validate**: One-click re-evaluation button with instant refresh.
+* **Audit History View**: Shows chronological history of past validation runs with trigger source (`EXTRACTION`, `MANUAL_CORRECTION`, `API_REVALIDATE`).
+
+---
+
 ## Roadmap & Completion Checklist
 
 - [x] **Phase 1: Architecture & Project Foundation**: Modular monolith, FastAPI, SQLAlchemy 2.0, Alembic, Redis, React Vite App Shell, Health Dashboard, Docker Compose.
@@ -637,5 +701,23 @@ Synthetic documents with ground truth evaluated against the extraction engine yi
   - [x] Frontend `DocumentExtractionModal` with editable financial forms, uncalibrated confidence indicators, and source page badges.
   - [x] Frontend `ReviewQueuePage` with live queue table, discrepancy filters, and one-click resolution.
   - [x] Verification test suite: 48/48 backend tests passing (100%) and 11/11 frontend tests passing (100%).
+- [x] **Phase 6: Financial Business Rules and Validation Engine**:
+  - [x] High-precision Decimal arithmetic financial calculation engine (`FinancialValidationEngine`).
+  - [x] Mandatory fields validation per document type (Invoices, Bank Statements, Expense Reports).
+  - [x] ISO 8601 date format and sequence validation (`due_date >= invoice_date`, statement period `start_date <= end_date`).
+  - [x] Subtotal, tax, and total invoice reconciliation with configurable rounding tolerance (`validation_rounding_tolerance`).
+  - [x] Itemized line items sum vs subtotal reconciliation.
+  - [x] Transaction debit/credit representation checks (mutual exclusivity, non-negative values, amount presence).
+  - [x] Bank statement consecutive running balances check and closing ledger balance reconciliation.
+  - [x] Multi-tenant duplicate invoice identifier detection scoped to organization and vendor history.
+  - [x] Standard ISO 4217 currency precision rules (0, 2, or 3 decimals) and fractional cent overflow warnings.
+  - [x] Negative value notices for credit notes and adjustments.
+  - [x] Three-tiered severity rating: `ERROR`, `WARNING`, and `INFO`.
+  - [x] Immutable validation history records (`ValidationRun` model and Alembic migration `0006_validation_history`).
+  - [x] Automatic re-validation upon authorized manual corrections with audit logging.
+  - [x] On-demand validation API endpoints (`POST /documents/{doc_id}/validate`, `GET validation-latest`, `GET validation-history`).
+  - [x] Side-by-side interactive validation results panel in frontend modal with severity filtering and audit history.
+  - [x] Verification test suite: 57/57 backend tests passing (100%) and 11/11 frontend tests passing (100%).
+
 
 

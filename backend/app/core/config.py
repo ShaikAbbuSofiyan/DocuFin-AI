@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.0
     extraction_confidence_threshold: float = 0.75
 
+    # Financial Business Rules & Validation Engine (Phase 6)
+    validation_rounding_tolerance: float = 0.05
+    validation_default_currency_precision: int = 2
+    validation_strict_mode: bool = False
+
     # Storage Settings
     upload_dir: str = "./storage/documents"
     storage_dir: str = "./storage/documents"
@@ -174,3 +179,6 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached settings singleton provider."""
     return Settings()
+
+
+settings = get_settings()
