@@ -1,10 +1,20 @@
-"""DocuFin AI Integration Module.
+"""DocuFin AI Integration Module."""
+from app.ai.llm_provider import (
+    GeminiProvider,
+    LLMExtractionResult,
+    LLMProvider,
+    LLMTokenUsage,
+    MockLLMProvider,
+    OpenAIProvider,
+    get_llm_provider,
+)
 
-This module will house:
-- LLM providers & orchestration (LangChain / LlamaIndex / Gemini / OpenAI)
-- RAG retrieval pipelines & vector stores (pgvector / Chroma)
-- Financial document parsing & table extraction services
-- Financial entity recognition and confidence scoring
-
-Reserved for Phase 2+.
-"""
+__all__ = [
+    "LLMProvider",
+    "MockLLMProvider",
+    "OpenAIProvider",
+    "GeminiProvider",
+    "get_llm_provider",
+    "LLMExtractionResult",
+    "LLMTokenUsage",
+]

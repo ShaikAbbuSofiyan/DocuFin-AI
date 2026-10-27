@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     processing_timeout_seconds: int = 300
     ocr_min_words_threshold: int = 20
 
+    # Financial Document Intelligence & Structured Extraction (Phase 5)
+    llm_provider: str = "mock"  # "mock", "openai", "gemini"
+    openai_api_key: Optional[str] = None
+    openai_model: str = "gpt-4o-mini"
+    openai_base_url: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    gemini_model: str = "gemini-1.5-flash"
+    llm_timeout_seconds: int = 30
+    llm_max_retries: int = 2
+    llm_temperature: float = 0.0
+    extraction_confidence_threshold: float = 0.75
+
     # Storage Settings
     upload_dir: str = "./storage/documents"
     storage_dir: str = "./storage/documents"

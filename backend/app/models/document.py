@@ -65,3 +65,6 @@ class Document(Base, TimestampMixin):
     pages: Mapped[list["DocumentPage"]] = relationship(
         "DocumentPage", back_populates="document", cascade="all, delete-orphan", order_by="DocumentPage.page_number"
     )
+    extractions: Mapped[list["DocumentExtraction"]] = relationship(
+        "DocumentExtraction", back_populates="document", cascade="all, delete-orphan", order_by="desc(DocumentExtraction.created_at)"
+    )

@@ -13,8 +13,10 @@ import {
   Shield,
   Trash2,
   Cpu,
+  Sparkles,
 } from 'lucide-react';
 import { StatusBadge } from '../components/common/StatusBadge';
+import { DocumentExtractionModal } from '../components/documents/DocumentExtractionModal';
 import { DocumentPreviewModal } from '../components/documents/DocumentPreviewModal';
 import { DocumentProcessingModal } from '../components/documents/DocumentProcessingModal';
 import { DocumentUploadModal } from '../components/documents/DocumentUploadModal';
@@ -48,6 +50,8 @@ export const DocumentsPage: React.FC = () => {
   const [isPreviewOpen, setIsPreviewOpen] = useState<boolean>(false);
   const [selectedProcessingDoc, setSelectedProcessingDoc] = useState<DocumentItem | null>(null);
   const [isProcessingOpen, setIsProcessingOpen] = useState<boolean>(false);
+  const [selectedExtractionDoc, setSelectedExtractionDoc] = useState<DocumentItem | null>(null);
+  const [isExtractionOpen, setIsExtractionOpen] = useState<boolean>(false);
 
   // Permissions
   const canUpload =
@@ -108,6 +112,11 @@ export const DocumentsPage: React.FC = () => {
   const openProcessing = (doc: DocumentItem) => {
     setSelectedProcessingDoc(doc);
     setIsProcessingOpen(true);
+  };
+
+  const openExtraction = (doc: DocumentItem) => {
+    setSelectedExtractionDoc(doc);
+    setIsExtractionOpen(true);
   };
 
   const formatFileSize = (bytes: number): string => {
@@ -433,6 +442,13 @@ export const DocumentsPage: React.FC = () => {
                           <Cpu className="w-4 h-4" />
                         </button>
                         <button
+                          onClick={() => openExtraction(doc)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition"
+                          title="Structured Financial Data & Verification"
+                        >
+                          <Sparkles className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => openPreview(doc)}
                           className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition"
                           title="Preview Document"
@@ -524,6 +540,16 @@ export const DocumentsPage: React.FC = () => {
           setSelectedProcessingDoc(null);
         }}
         onStatusChange={fetchDocuments}
+      />
+
+      <DocumentExtractionModal
+        document={selectedExtractionDoc}
+        isOpen={isExtractionOpen}
+        onClose={() => {
+          setIsExtractionOpen(false);
+          setSelectedExtractionDoc(null);
+        }}
+        onUpdateSuccess={fetchDocuments}
       />
     </div>
   );

@@ -233,4 +233,47 @@ export const apiClient = {
     request<import('../types/document').DocumentExtractedTextResponse>(
       `/api/v1/documents/${docId}/extracted-text`
     ),
+
+  // Phase 5: Structured Financial Extraction & Review Queue
+  extractDocument: (docId: string, forceReextract = false, docType?: string) =>
+    request<import('../types/extraction').DocumentExtractionResponse>(
+      `/api/v1/documents/${docId}/extract`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          force_reextract: forceReextract,
+          document_type: docType || undefined,
+        }),
+      }
+    ),
+
+  getDocumentExtraction: (docId: string) =>
+    request<import('../types/extraction').DocumentExtractionResponse>(
+      `/api/v1/documents/${docId}/extraction`
+    ),
+
+  updateDocumentExtraction: (
+    docId: string,
+    payload: import('../types/extraction').DocumentExtractionUpdate
+  ) =>
+    request<import('../types/extraction').DocumentExtractionResponse>(
+      `/api/v1/documents/${docId}/extraction`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  getReviewQueue: (page = 1, pageSize = 20) =>
+    request<import('../types/extraction').ReviewQueueItem[]>(
+      `/api/v1/documents/review-queue?page=${page}&page_size=${pageSize}`
+    ),
+
+  classifyDocument: (docId: string) =>
+    request<{ document_type: string; confidence: number; signals: string[]; method: string }>(
+      `/api/v1/documents/${docId}/classify`,
+      {
+        method: 'POST',
+      }
+    ),
 };

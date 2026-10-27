@@ -38,7 +38,15 @@ from app.schemas.processing import (
     ProcessingJobResponse,
     ProcessingJobTriggerRequest,
 )
+from app.schemas.extraction import (
+    ClassificationResult,
+    DocumentExtractionResponse,
+    DocumentExtractionUpdate,
+    ReviewQueueItem,
+    TriggerExtractionRequest,
+)
 from app.services.document_service import DocumentService
+from app.services.extraction_service import FinancialExtractionService
 from app.workers.document_tasks import recover_stale_jobs
 
 router = APIRouter()
@@ -300,6 +308,31 @@ async def list_org_documents(
 # ==============================================================================
 # Single Document Retrieval, Details, Preview & Download Endpoints
 # ==============================================================================
+
+@router.get(
+    "/documents/review-queue",
+    response_model=List[ReviewQueueItem],
+    summary="List documents routed to manual human-in-the-loop review",
+)
+async def get_review_queue_endpoint(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(get_active_org_membership),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retrieves confidence-ranked items requiring human analyst sign-off
+    due to low confidence, mathematical ledger discrepancies, or missing critical fields.
+    """
+    service = FinancialExtractionService(db)
+    items, _ = await service.get_review_queue(
+        org_id=membership.organization_id,
+        page=page,
+        page_size=page_size,
+    )
+    return items
+
 
 @router.get(
     "/documents/{doc_id}",
@@ -671,3 +704,114 @@ async def recover_stale_jobs_endpoint(
 
     count = await recover_stale_jobs(db_session=db)
     return MessageResponse(message=f"Recovery scan completed. {count} stale jobs updated.")
+
+
+# ==============================================================================
+# Phase 5: Financial Document Intelligence & Structured Extraction Endpoints
+# ==============================================================================
+
+@router.post(
+    "/documents/{doc_id}/extract",
+    response_model=DocumentExtractionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Extract structured financial entities from document OCR text",
+)
+async def extract_document_endpoint(
+    doc_id: str,
+    payload: Optional[TriggerExtractionRequest] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Executes financial document intelligence using versioned Pydantic schemas.
+    Applies LLM extraction, deterministic fallback, math verification, and review routing.
+    Independent of specific LLM providers.
+    """
+    doc, mem = await verify_document_access(doc_id, current_user, db)
+    if mem and mem.role.lower() not in [
+        OrganizationRole.ADMIN.value.lower(),
+        OrganizationRole.ANALYST.value.lower(),
+    ] and not current_user.is_superuser:
+        raise ForbiddenError("Only Administrators and Analysts can trigger structured extraction.")
+
+    pref_type = payload.document_type if payload else None
+    force = payload.force_reextract if payload else False
+
+    service = FinancialExtractionService(db)
+    extraction = await service.extract_document(
+        doc_id=doc.id,
+        org_id=doc.organization_id,
+        preferred_doc_type=pref_type,
+        force_reextract=force,
+    )
+    return extraction
+
+
+@router.get(
+    "/documents/{doc_id}/extraction",
+    response_model=DocumentExtractionResponse,
+    summary="Inspect latest structured extraction, field-level confidence and source page references",
+)
+async def get_document_extraction_endpoint(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns extracted structured financial data, per-field source page references,
+    confidence indicators, and review audit history.
+    """
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    service = FinancialExtractionService(db)
+    extraction = await service.get_extraction(doc_id=doc.id, org_id=doc.organization_id)
+    if not extraction:
+        raise NotFoundError("Structured extraction for document", doc_id)
+    return extraction
+
+
+@router.patch(
+    "/documents/{doc_id}/extraction",
+    response_model=DocumentExtractionResponse,
+    summary="Update or correct extracted financial fields and submit review decision",
+)
+async def update_document_extraction_endpoint(
+    doc_id: str,
+    payload: DocumentExtractionUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Allows analysts and reviewers to edit extracted fields in the UI,
+    record audit notes, and mark documents as APPROVED or REJECTED.
+    """
+    doc, mem = await verify_document_access(doc_id, current_user, db)
+    service = FinancialExtractionService(db)
+    updated = await service.update_extraction(
+        doc_id=doc.id,
+        org_id=doc.organization_id,
+        payload=payload,
+        analyst_user=current_user,
+    )
+    return updated
+
+
+@router.post(
+    "/documents/{doc_id}/classify",
+    response_model=ClassificationResult,
+    summary="Classify document category (Invoice, Bank Statement, Expense Report)",
+)
+async def classify_document_endpoint(
+    doc_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Classifies document using domain heuristics and keyword density scoring."""
+    doc, _ = await verify_document_access(doc_id, current_user, db)
+    doc_service = DocumentService(db)
+    pages = await doc_service.get_extracted_pages(doc_id=doc.id, org_id=doc.organization_id)
+    if not pages.pages:
+        raise ValidationError("Document has no OCR pages. Run processing first.")
+
+    full_text = "\n".join(p.text_content for p in pages.pages)
+    service = FinancialExtractionService(db)
+    return await service.llm_provider.classify_document(full_text)
