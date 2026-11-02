@@ -299,5 +299,134 @@ export const apiClient = {
     request<import('../types/extraction').ValidationRunResponse[]>(
       `/api/v1/documents/${docId}/validation-history`
     ),
+
+  // Phase 7: Retrieval-Augmented Generation & Financial Chat Assistant
+  queryChatAssistant: (payload: import('../types/chat').ChatQueryRequest) =>
+    request<import('../types/chat').ChatQueryResponse>(
+      `/api/v1/chat/query`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  indexDocumentForRag: (docId: string) =>
+    request<{ success: boolean; document_id: string; chunks_indexed: number; message: string }>(
+      `/api/v1/chat/index/${docId}`,
+      {
+        method: 'POST',
+      }
+    ),
+
+  getChatConversations: () =>
+    request<import('../types/chat').ConversationResponse[]>(
+      `/api/v1/chat/conversations`
+    ),
+
+  getChatConversation: (conversationId: string) =>
+    request<import('../types/chat').ConversationResponse>(
+      `/api/v1/chat/conversations/${conversationId}`
+    ),
+
+  deleteChatConversation: (conversationId: string) =>
+    request<{ success: boolean; message: string }>(
+      `/api/v1/chat/conversations/${conversationId}`,
+      {
+        method: 'DELETE',
+      }
+    ),
+
+  // Phase 8: Human Review Workflow & Regulatory Audit Trails
+  getReviewTasks: (params?: import('../types/review').ReviewFilterParams) => {
+    const query = new URLSearchParams();
+    if (params?.status) query.set('status', params.status);
+    if (params?.document_type) query.set('document_type', params.document_type);
+    if (params?.assigned_to_id) query.set('assigned_to_id', params.assigned_to_id);
+    if (params?.date_from) query.set('date_from', params.date_from);
+    if (params?.date_to) query.set('date_to', params.date_to);
+    if (params?.search) query.set('search', params.search);
+    if (params?.page) query.set('page', String(params.page));
+    if (params?.page_size) query.set('page_size', String(params.page_size));
+    const qs = query.toString();
+    return request<import('../types/review').PaginatedReviewQueueResponse>(
+      `/api/v1/reviews/queue${qs ? `?${qs}` : ''}`
+    );
+  },
+
+  getReviewTask: (taskId: string) =>
+    request<import('../types/review').ReviewTaskDetailResponse>(
+      `/api/v1/reviews/${taskId}`
+    ),
+
+  assignReviewTask: (
+    taskId: string,
+    payload: import('../types/review').AssignReviewTaskPayload
+  ) =>
+    request<import('../types/review').ReviewTaskDetailResponse>(
+      `/api/v1/reviews/${taskId}/assign`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  correctReviewFields: (
+    taskId: string,
+    payload: import('../types/review').CorrectFieldsPayload
+  ) =>
+    request<import('../types/review').ReviewTaskDetailResponse>(
+      `/api/v1/reviews/${taskId}/correct`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  approveReviewTask: (
+    taskId: string,
+    payload: import('../types/review').ApproveReviewTaskPayload
+  ) =>
+    request<import('../types/review').ReviewTaskDetailResponse>(
+      `/api/v1/reviews/${taskId}/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  rejectReviewTask: (
+    taskId: string,
+    payload: import('../types/review').RejectReviewTaskPayload
+  ) =>
+    request<import('../types/review').ReviewTaskDetailResponse>(
+      `/api/v1/reviews/${taskId}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  getReviewTaskHistory: (taskId: string) =>
+    request<import('../types/review').ReviewHistoryItem[]>(
+      `/api/v1/reviews/${taskId}/history`
+    ),
+
+  getAuditLogs: (params?: import('../types/audit').AuditLogFilterParams) => {
+    const query = new URLSearchParams();
+    if (params?.action) query.set('action', params.action);
+    if (params?.resource_type) query.set('resource_type', params.resource_type);
+    if (params?.resource_id) query.set('resource_id', params.resource_id);
+    if (params?.user_id) query.set('user_id', params.user_id);
+    if (params?.date_from) query.set('date_from', params.date_from);
+    if (params?.date_to) query.set('date_to', params.date_to);
+    if (params?.search) query.set('search', params.search);
+    if (params?.page) query.set('page', String(params.page));
+    if (params?.page_size) query.set('page_size', String(params.page_size));
+    const qs = query.toString();
+    return request<import('../types/audit').PaginatedAuditLogResponse>(
+      `/api/v1/audit/logs${qs ? `?${qs}` : ''}`
+    );
+  },
 };
+
 

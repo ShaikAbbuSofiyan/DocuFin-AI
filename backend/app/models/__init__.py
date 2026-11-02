@@ -10,6 +10,10 @@ from app.models.processing_job import JobStatus, ProcessingJob, ProcessingStage
 from app.models.user import User
 
 from app.models.validation_history import ValidationRun, ValidationSeverity
+from app.models.document_chunk import DocumentChunk
+from app.models.chat import ChatConversation, ChatMessage
+from app.models.review_task import ReviewTask, ReviewTaskStatus, ReviewTaskPriority
+from app.models.review_history import ReviewHistory
 
 __all__ = [
     "Base",
@@ -27,5 +31,12 @@ __all__ = [
     "OrganizationRole",
     "ValidationRun",
     "ValidationSeverity",
+    "DocumentChunk",
+    "ChatConversation",
+    "ChatMessage",
+    "ReviewTask",
+    "ReviewTaskStatus",
+    "ReviewTaskPriority",
+    "ReviewHistory",
 ]
 

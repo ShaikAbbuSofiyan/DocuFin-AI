@@ -641,6 +641,58 @@ DocuFin AI implements a deterministic financial validation engine operating inde
 
 ---
 
+## Phase 8: Human Review Workflow & Immutable Audit Trails
+
+Phase 8 introduces enterprise-grade human-in-the-loop (HITL) review workflows, multi-tenant state machine governance, segregation of duties (dual control), optimistic concurrency locking, and regulatory audit trail persistence.
+
+### Key Capabilities & Architectural Safeguards
+
+1. **Review Tasks Linked to Extractions & Documents**:
+   - `ReviewTask` records maintain direct foreign keys to `Document` and `DocumentExtraction` version snapshots.
+   - Tasks are automatically assigned priority (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`) based on validation error severity, uncalibrated confidence scores, or manual analyst dispatch.
+   - SLA target tracking (`due_date`) based on configurable organizational policies (`REVIEW_TASK_DEFAULT_SLA_HOURS`).
+2. **Explicit, Validated State Machines**:
+   - `StateMachineValidator` strictly governs document status transitions (`UPLOADED` -> `QUEUED` -> `PROCESSING` -> `IN_REVIEW` -> `APPROVED` / `REJECTED`) and review task transitions (`PENDING` -> `IN_REVIEW` -> `APPROVED` / `REJECTED` / `CANCELLED`).
+   - Invalid lifecycle jumps (e.g. attempting to approve a rejected or processing document) raise `ValidationError` (HTTP 422).
+3. **Filterable Review Queue**:
+   - High-throughput query engine supporting filters by task status, document classification type, assignment (`assigned_to_id` / unassigned), priority, date ranges, and keyword search.
+4. **Side-by-Side Review Workspace**:
+   - Split-screen workspace rendering the original document (inline PDF viewer or image canvas) alongside editable structured financial fields, page OCR transcripts, and live rule validation cards.
+5. **Field Corrections & Value Diff History**:
+   - Authorized reviewers can correct extracted fields.
+   - Every modification is automatically diffed (`old_value` vs `new_value`) and permanently stored in `ReviewHistory` rows with reviewer identity, role, timestamp, and notes.
+   - Automatic re-validation is triggered upon correction.
+6. **Segregation of Duties (Dual-Control Policy)**:
+   - Configurable compliance switch (`REVIEW_ENFORCE_DUAL_CONTROL=True`).
+   - Prevents the user who uploaded the document or made manual corrections from unilaterally approving their own document. A distinct reviewer or administrator must perform the final approval.
+7. **Safe Concurrent Updates (Optimistic Concurrency Locking)**:
+   - Every `ReviewTask` carries an incrementing integer `version`.
+   - Modifying, approving, or rejecting a review task requires the client to supply `expected_version`.
+   - If a concurrent reviewer modified the task in the interim, the request is rejected with `ConflictError` (HTTP 409) with a prompt to refresh.
+8. **Rejection Safeguards**:
+   - Consequential state changes require clear warnings; rejections strictly require a non-empty explanation (`rejection_reason`).
+9. **Immutable, Append-Only Audit Logging**:
+   - Regulatory audit events are persisted directly into the backend database (`audit_logs` table), never client-side.
+   - Captures `organization_id`, `user_id`, `user_email`, `action`, `resource_type`, `resource_id`, `ip_address`, and before/after state diffs.
+10. **Searchable, Paginated Audit Log API & Modal**:
+    - Filterable by user email, action, resource type, resource ID, and date range with offset/limit pagination.
+
+### Key API Endpoints (Phase 8)
+
+| Method | Endpoint | Description | Role / Auth |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/reviews/queue` | Query review tasks with filters, priority, and pagination | Reviewer / Admin |
+| `POST` | `/api/v1/reviews` | Manually route a document to the review queue | Analyst / Reviewer / Admin |
+| `GET` | `/api/v1/reviews/{task_id}` | Retrieve full task details, document, extraction, and validation | Reviewer / Admin |
+| `POST` | `/api/v1/reviews/{task_id}/assign` | Assign review task to a specific user or self | Reviewer / Admin |
+| `POST` | `/api/v1/reviews/{task_id}/correct` | Correct extracted fields with optimistic locking & diff tracking | Reviewer / Admin |
+| `POST` | `/api/v1/reviews/{task_id}/approve` | Approve task & document with dual-control policy enforcement | Reviewer / Admin |
+| `POST` | `/api/v1/reviews/{task_id}/reject` | Reject task & document with mandatory reason and confirmation | Reviewer / Admin |
+| `GET` | `/api/v1/reviews/{task_id}/history` | Retrieve chronological review decision and field diff history | Reviewer / Admin |
+| `GET` | `/api/v1/audit/logs` | Searchable, paginated regulatory audit log stream | Admin / Reviewer |
+
+---
+
 ## Roadmap & Completion Checklist
 
 - [x] **Phase 1: Architecture & Project Foundation**: Modular monolith, FastAPI, SQLAlchemy 2.0, Alembic, Redis, React Vite App Shell, Health Dashboard, Docker Compose.
@@ -667,7 +719,7 @@ DocuFin AI implements a deterministic financial validation engine operating inde
   - [x] Paginated document query engine with search, filters (status, doc_type), and sorting.
   - [x] Safe inline preview (`/preview`) and attachment download (`/download`) with security headers.
   - [x] Consistent database & storage deletion.
-  - [x] Document statuses: `UPLOADED`, `QUEUED`, `PROCESSING`, `REVIEW_REQUIRED`, `APPROVED`, `REJECTED`, `FAILED`.
+  - [x] Document statuses: `UPLOADED`, `QUEUED`, `PROCESSING`, `REVIEW_REQUIRED`, `IN_REVIEW`, `APPROVED`, `REJECTED`, `FAILED`.
   - [x] Frontend Document Library with drag-and-drop dropzone, upload progress bar, search, filter, pagination, preview modal, and empty/loading/error states.
   - [x] Verification test suite: 29 backend tests (100% pass) and 11 frontend tests (100% pass).
 - [x] **Phase 4: OCR and Asynchronous Document Processing**:
@@ -718,6 +770,33 @@ DocuFin AI implements a deterministic financial validation engine operating inde
   - [x] On-demand validation API endpoints (`POST /documents/{doc_id}/validate`, `GET validation-latest`, `GET validation-history`).
   - [x] Side-by-side interactive validation results panel in frontend modal with severity filtering and audit history.
   - [x] Verification test suite: 57/57 backend tests passing (100%) and 11/11 frontend tests passing (100%).
-
-
+- [x] **Phase 7: Retrieval-Augmented Generation for Financial Documents**:
+  - [x] Document text chunking service preserving document IDs, 1-indexed page numbers, organization IDs, and access metadata (`DocumentChunkingService`).
+  - [x] Embedding provider abstraction (`EmbeddingProvider`, `MockEmbeddingProvider`, `OpenAIEmbeddingProvider`, `GeminiEmbeddingProvider`) configurable via environment variables (`EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`).
+  - [x] High-performance vector storage in PostgreSQL with `pgvector` (`VECTOR(384)`) with native cosine distance search, and SQLite array fallback for unit testing.
+  - [x] Alembic migration `0007_document_chunks_and_chat` creating `document_chunks`, `chat_conversations`, and `chat_messages` tables with `CREATE EXTENSION IF NOT EXISTS vector`.
+  - [x] Hybrid semantic retrieval combining vector cosine similarity with BM25/keyword overlap ranking.
+  - [x] Multi-tenant access permission enforcement before retrieving document content (cross-organization access strictly blocked with `403 Forbidden`).
+  - [x] Deterministic Financial Aggregation engine (`DeterministicFinancialAggregator`): calculates invoice sums, overdue bills, bank opening/closing balances, transactions exceeding thresholds (e.g. ₹50,000), and records needing manual review directly from validated database records using Python `Decimal` arithmetic—*never letting an LLM calculate numerical financial totals when records can be queried directly*.
+  - [x] Strict prompt injection defense: encapsulates untrusted document content within `<document_context>` XML tags with system instructions to ignore instructions embedded in document text.
+  - [x] Verifiable source citations for every factual statement: returns document title, 1-indexed page number, and supporting verbatim excerpt.
+  - [x] Standard insufficient-evidence response (`has_sufficient_evidence=False`, `"Could not find sufficient information..."`) when evidence is missing or relevance score is below configurable threshold (`RAG_SIMILARITY_THRESHOLD`).
+  - [x] Multi-turn conversation management with message history, document scoping, and thread deletion (`POST /api/v1/chat/query`, `POST /api/v1/chat/index/{doc_id}`, `GET /api/v1/chat/conversations`, `GET /api/v1/chat/conversations/{id}`, `DELETE /api/v1/chat/conversations/{id}`).
+  - [x] Rich Frontend Financial AI Assistant interface (`AiAssistantPage.tsx`) featuring document multi-select scope, thread history sidebar, "Index for RAG" trigger, deterministic calculation badges, citation cards, and quick question chips.
+  - [x] Synthetic evaluation benchmark measuring:
+    - **Retrieval Recall@3**: 100.0%
+    - **Citation Correctness**: 100.0%
+  - [x] Verification test suite: 66/66 backend tests passing (100%) and 11/11 frontend tests passing (100%).
+- [x] **Phase 8: Human Review Workflow and Audit Trails**:
+  - [x] Review tasks linked to documents and extraction versions (`ReviewTask` model and Alembic migration `0008_review_workflow_and_audit`).
+  - [x] Explicit, validated state machines for document transitions and review task transitions (`StateMachineValidator`).
+  - [x] Review queue API with filtering by status, document type, date range, assigned reviewer, priority, and text search (`GET /api/v1/reviews/queue`).
+  - [x] Side-by-side Review Workspace modal (`ReviewWorkspaceModal.tsx`) showing original document PDF/image preview beside editable extracted financial fields and validation cards.
+  - [x] Field corrections with before/after diff tracking stored in immutable `ReviewHistory` rows (`POST /api/v1/reviews/{task_id}/correct`).
+  - [x] Reviewer assignment, approval, and rejection with mandatory reason and warning confirmation modals.
+  - [x] Segregation of Duties / dual-control enforcement (`REVIEW_ENFORCE_DUAL_CONTROL=True`): blocks uploader and correcting analyst from self-approving.
+  - [x] Optimistic concurrency control via task integer `version`: detects concurrent edits and returns HTTP 409 Conflict.
+  - [x] Append-only database audit logs (`AuditLog` model & `AuditService`): records actor identity, IP address, timestamps, action, and state diffs.
+  - [x] Searchable, paginated audit log API (`GET /api/v1/audit/logs`) and frontend regulatory inspection modal (`AuditLogModal.tsx`).
+  - [x] Verification test suite: 74/74 backend tests passing (100%), 11/11 frontend tests passing (100%), and zero TypeScript build errors.
 

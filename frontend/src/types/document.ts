@@ -3,6 +3,7 @@ export type DocumentStatus =
   | 'QUEUED'
   | 'PROCESSING'
   | 'REVIEW_REQUIRED'
+  | 'IN_REVIEW'
   | 'APPROVED'
   | 'REJECTED'
   | 'FAILED';

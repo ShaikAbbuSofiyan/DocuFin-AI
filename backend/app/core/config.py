@@ -90,6 +90,20 @@ class Settings(BaseSettings):
     validation_default_currency_precision: int = 2
     validation_strict_mode: bool = False
 
+    # Retrieval-Augmented Generation & Embeddings (Phase 7)
+    embedding_provider: str = "mock"  # "mock", "openai", "gemini"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: int = 384
+    rag_similarity_threshold: float = 0.25
+    rag_max_retrieved_chunks: int = 5
+    rag_chunk_size: int = 500
+    rag_chunk_overlap: int = 100
+    rag_timeout_seconds: int = 30
+
+    # Human Review Workflow & Dual Control Policy (Phase 8)
+    review_enforce_dual_control: bool = True
+    review_task_default_sla_hours: int = 48
+
     # Storage Settings
     upload_dir: str = "./storage/documents"
     storage_dir: str = "./storage/documents"

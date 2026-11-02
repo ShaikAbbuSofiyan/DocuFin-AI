@@ -11,6 +11,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.models.document import Document, DocumentStatus
 from app.models.document_extraction import DocumentExtraction, ExtractionStatus
 from app.models.document_page import DocumentPage
+from app.models.review_task import ReviewTask, ReviewTaskPriority, ReviewTaskStatus
 from app.models.user import User
 from app.schemas.extraction import (
     BankStatementData,
@@ -241,6 +242,29 @@ class FinancialExtractionService:
         doc.doc_type = target_type.value
         if needs_review:
             doc.status = DocumentStatus.REVIEW_REQUIRED.value
+            existing_task_res = await self.db.execute(
+                select(ReviewTask).where(
+                    ReviewTask.document_id == doc.id,
+                    ReviewTask.status.in_([ReviewTaskStatus.PENDING.value, ReviewTaskStatus.IN_REVIEW.value]),
+                )
+            )
+            if not existing_task_res.scalar_one_or_none():
+                prio = (
+                    ReviewTaskPriority.CRITICAL.value
+                    if val_summary.error_count > 2
+                    else (ReviewTaskPriority.HIGH.value if val_summary.error_count > 0 else ReviewTaskPriority.MEDIUM.value)
+                )
+                review_task = ReviewTask(
+                    document_id=doc.id,
+                    extraction_id=extraction.id,
+                    organization_id=doc.organization_id,
+                    status=ReviewTaskStatus.PENDING.value,
+                    priority=prio,
+                    review_reasons=review_reasons,
+                    validation_error_count=val_summary.error_count,
+                    version=1,
+                )
+                self.db.add(review_task)
         else:
             doc.status = DocumentStatus.APPROVED.value
 
